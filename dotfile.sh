@@ -74,6 +74,7 @@ install_go_tools() {
 
 install_wordlists() {
     mkdir -p "$HOME/tools"
+    sudo apt install seclists
     cat /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt /usr/share/seclists/Discovery/Web-Content/api/api-seen-in-wild.txt /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt | tr [A-Z] [a-z] | sort -u > "$HOME/tools/content-directories.txt"
 }
 
@@ -91,6 +92,7 @@ install_rustscan() {
 }
 
 git_clone_tooling() {
+    export GIT_TERMINAL_PROMPT=0
     git clone https://github.com/BooOM/fuzz.txt "$HOME/tools/lists/"
     
     git clone https://github.com/Sybil-Scan/getresolvers "$HOME/tools/getresolvers/"
@@ -103,8 +105,9 @@ git_clone_tooling() {
 mkdir -p "$HOME/tool_logs/"
 
 install_all_tools () {
-install_rustscan
+
 install_go
+install_rustscan
 install_go_tools
 install_wordlists
 git_clone_tooling
@@ -150,7 +153,7 @@ scope_scan_all () {
 feroxbuster_urls() {
   logtime="$(now)"
   url=${1?Error: no url file found}
-  domain=${echo "$url" | cut -d \/ -f3}
+  domain=$(echo "$url" | cut -d \/ -f3)
   set -x
   mkdir -p feroxbuster
   echo "$url" | feroxbuster --depth 3 --stdin --silent --no-state --filter-status 400,404,500,403 -k -A -o feroxbuster/"$logtime"-"$domain"-content-directories.output -w ~/tools/content-directories.txt
@@ -243,15 +246,13 @@ apex_quick() {
   subfinder -d "$domain" -silent | anew "quick/"$domain"-subs.txt" | \
   dnsx -resp -silent | anew "quick/"$domain"-alive-subs-ip.txt" | awk '{print $1}' | anew "quick/"$domain"-alive-subs.txt"
   flyover "quick/"$domain"-alive-subs-ip.txt"
-  sudo rustscan -a "quick/"$domain"-alive-subs.txt" --ulimit 5000 -b 1000 -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
+  sudo rustscan -a "quick/"$domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
   get_web_servers
   # fix this, this isnt generating links correctly
   #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quickwins/"$domain"-gau.txt" | \
   #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quickwins/"$domain"-web-alive.txt" | awk '{print $1}' | \
-  nuclei -l "quick/"$domain"-alive-subs.txt" -t ~/tools/nuclei-templates/http/ -sa -o "quick/"$domain"-nuclei.txt"
-  
+  nuclei -sa -as -l "quick/"$domain"-alive-subs.txt" -o "quick/"$domain"-nuclei.txt"
   # nonstandard web servers 
-  nuclei -l ./urls.txt -t ~/tools/nuclei-templates/http/ -sa -o "quick/"$domain"-nuclei.txt"
-  #set +x
+  nuclei -l ./urls.txt -as -sa -o "quick/"$domain"-nuclei_nonstandard_web.txt"
+  set +x
 }
-
