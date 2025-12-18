@@ -128,7 +128,8 @@ scope_scan_all () {
   abspath="$(pwd)""/""$1"
   set -x
   mkdir -p rustscan
-  echo "beginning rustscan at $logtime with command 'rustscan -a $1 -b 1000 -- -sS -sV -A -Pn -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
+  # to do - get hostname before calling the scan, and tweak the nmap flags 
+  echo "beginning rustscan at $logtime with command 'rustscan -a $1 -- -sS -sV -A -Pn -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
   cd ./rustscan && rustscan -a "$abspath" --ulimit 5000 -- -sS -sV -A -Pn -oA {{ip}}-"$logtime"-output
   
   # use these for feroxbusting later
