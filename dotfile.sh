@@ -175,7 +175,7 @@ apex_expand_scope (){
   echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
   gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
   cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
-  
+  echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
 }
 
 #TODO Fix this
