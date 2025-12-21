@@ -130,24 +130,27 @@ scope_scan_all () {
   logtime="$(now)"
   abspath="$(pwd)""/""$1"
   set -x
-  mkdir -p rustscan
+  mkdir -p rustscan nuclei
   # to do - get hostname before calling the scan, and tweak the nmap flags 
   echo "beginning rustscan at $logtime with command 'rustscan -a $1 -- -sS -sV -A -Pn -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
-  cd ./rustscan && rustscan -a "$abspath" --ulimit 5000 -- -sS -sV -A -Pn -oA {{ip}}-"$logtime"-output
+  cd ./rustscan && sudo rustscan -a "$abspath" --ulimit 5000 -- -sS -sV -A -Pn -oA {{ip}}-"$logtime"-output
   
   # use these for feroxbusting later
   get_web_servers
   
   # we run flyover on the scope file because we want to capture screenshots of fqdns and not direct access IPs
-  cd ../ && flyover "$abspath"
+  flyover "$abspath"
   set +x
 
-  echo "Rustscan and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
+  # nuclei scans
+  nuclei -sa -as -l "$abspath" -o "nuclei/"$domain"-nuclei.txt"
+  
+  # nonstandard web servers 
+  nuclei -l ../rustscan/urls.txt -as -sa -o "nuclei/"$domain"-nuclei_nonstandard_web.txt"
+  
+  echo "Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
   1. Use crawl_fqdns if no direct access allowed
   2. Use feroxbuster_urls ./urls.txt if direct access allowed
-  
-  Next, run
-  Run nuclei scans with fqdns_nuclei ./fqdns.txt (or scope) or url_nuclei ./urls.txt
   
   Finally, review all output and begin manual testing!"
 
