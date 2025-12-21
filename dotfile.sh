@@ -57,11 +57,14 @@ install_go() {
 
 install_go_tools() {
     sudo apt install -y libpcap-dev tmux time parallel git make gcc
+    # kalis pre packaged amass is missing some critical features such as 'intel'
+    sudo apt remove -y amass
     go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
     CGO_ENABLED=1 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
     go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
     go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
     go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+    go install -v github.com/owasp-amass/amass/v4/...@master
     go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
     go install -v github.com/tomnomnom/anew@latest
     go install -v github.com/tomnomnom/unfurl@latest
@@ -165,7 +168,7 @@ apex_expand_scope (){
   logtime="$(now)"
   set +x 
   domain=$1
-  mkdir amass subfinder dnsrecon gobuster fqdns
+  mkdir  subfinder dnsrecon gobuster fqdns
   dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt
   amass enum -d "$domain" -active -o amass/"$logtime"-"$domain"-output -timeout 10
   cat amass/"$logtime"-"$domain"-output | cut -d " " -f1 | grep "$domain" | sort -u > amass/"$logtime"-"$domain"-amass.txt
