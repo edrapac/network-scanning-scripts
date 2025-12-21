@@ -168,13 +168,12 @@ apex_expand_scope (){
   logtime="$(now)"
   set +x 
   domain=$1
-  mkdir  subfinder dnsrecon gobuster fqdns
+  mkdir  subfinder dnsrecon gobuster fqdns amass
   dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt
   amass enum -d "$domain" -active -o amass/"$logtime"-"$domain"-output -timeout 10
-  cat amass/"$logtime"-"$domain"-output | cut -d " " -f1 | grep "$domain" | sort -u > amass/"$logtime"-"$domain"-amass.txt
+  cat amass/"$logtime"-"$domain"-output | awk '{printf $1; printf "\n"}' | grep "$domain" | uniq > amass/"$logtime"-"$domain"-amass.txt
   echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
   gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
-  gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/sortedcombined-knock-dnsrecon-fierce-reconng.txt -q >> gobuster/"$logtime"-"$domain"-gobuster-output.txt
   cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
   
 }
