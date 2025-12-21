@@ -139,15 +139,16 @@ scope_scan_all () {
   get_web_servers
   
   # we run flyover on the scope file because we want to capture screenshots of fqdns and not direct access IPs
-  flyover "$abspath"
-  set +x
+  cd ../ flyover "$abspath"
+  
 
   # nuclei scans
   nuclei -sa -as -l "$abspath" -o nuclei/full-scope-nuclei.txt
   
   # nonstandard web servers 
   nuclei -l ../rustscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
-  
+
+  set +x
   echo "Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
   1. Use crawl_fqdns if no direct access allowed
   2. Use feroxbuster_urls ./urls.txt if direct access allowed
