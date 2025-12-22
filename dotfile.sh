@@ -139,7 +139,7 @@ scope_scan_all () {
   get_web_servers
   
   # we run flyover on the scope file because we want to capture screenshots of fqdns and not direct access IPs
-  cd ../ flyover "$abspath"
+  cd ../ && flyover "$abspath"
   
 
   # nuclei scans
