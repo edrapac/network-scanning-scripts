@@ -270,7 +270,7 @@ scope_scan_all () {
   parse_gnmap_ports < "$f"
   done > ips_all_ports.csv
   # merge in rustscan results, map back to hostnames
-  merge_ip_hosts_ports ../mapping.csv all_ports.csv
+  merge_ip_hosts_ports ../mapping.csv ips_all_ports.csv
 
   # use these for feroxbusting later
   get_web_servers
