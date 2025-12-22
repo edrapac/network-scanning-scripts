@@ -124,17 +124,154 @@ enable_pwdless_root () {
 now() {
     date +"%Y%m%d_%H%M%S"
 }
+resolve_hostname_all() {
+  local host="$1"
 
+  # system resolver
+  dig +short "$host"
+
+  # public resolvers
+  dig @8.8.8.8 +short "$host"
+  dig @1.1.1.1 +short "$host"
+  dig @9.9.9.9 +short "$host"
+}
+parse_gnmap_ports () {
+  awk '
+  /^Host:/ {
+    ip="UNKNOWN"
+    os="UNKNOWN"
+
+    # IP
+    if (match($0, /^Host: ([0-9.]+)/, m)) {
+      ip=m[1]
+    }
+
+    # OS
+    if (match($0, /OS: ([^ ]+.*?)(  Seq Index:|$)/, o)) {
+      os=o[1]
+    }
+
+    # Ports
+    if (match($0, /Ports: (.*)/, p)) {
+      n=split(p[1], ports, ",")
+      for (i=1; i<=n; i++) {
+        split(ports[i], f, "/")
+
+        port=f[1]
+        state=f[2]
+        proto=toupper(f[3])
+        service=f[5]
+
+        if (state == "open") {
+          if (service == "" ) service="UNKNOWN"
+          printf "%s, %s, %s %s (%s)\n",
+                 ip, os, port, proto, toupper(service)
+        }
+      }
+    }
+  }'
+}
+
+merge_ip_hosts_ports () {
+  local ip_host_csv="$1"
+  local ports_csv="$2"
+  local out_csv="${3:-hostname_ip_ports_merged.csv}"
+
+  # header
+  echo "ip,hostname,OS,port" > "$out_csv"
+
+  awk -F', *' '
+    NR==FNR {
+      # build ip -> hostname(s) map (allow multiple hostnames per IP)
+      host[$1] = (host[$1] ? host[$1] RS $2 : $2)
+      next
+    }
+    {
+      ip=$1
+      os=$2
+      port=$3
+
+      if (ip in host) {
+        n = split(host[ip], h, RS)
+        for (i=1; i<=n; i++) {
+          printf "%s,%s,%s,%s\n", ip, h[i], os, port
+        }
+      } else {
+        printf "%s,UNKNOWN,%s,%s\n", ip, os, port
+      }
+    }
+  ' "$ip_host_csv" "$ports_csv" >> "$out_csv"
+}
+
+resolve_helper () {
+  infile="$1"
+  outfile="${2:-mapping.csv}"
+
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' EXIT
+
+  expand_cidr() {
+    nmap -n -sL "$1" 2>/dev/null | awk '/Nmap scan report for/ {print $NF}'
+  }
+
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    entry="$(echo "$entry" | xargs)"
+    [[ -z "$entry" ]] && continue
+
+    # CIDR
+    if [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+      expand_cidr "$entry" | while IFS= read -r ip; do
+        hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
+        [[ -z "$hostname" ]] && hostname="UNKNOWN"
+        echo "$ip,$hostname" >> "$tmp"
+      done
+
+    # IP
+    elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+      hostname="$(getent hosts "$entry" | awk '{print $2}' | head -n1)"
+      [[ -z "$hostname" ]] && hostname="UNKNOWN"
+      echo "$entry,$hostname" >> "$tmp"
+
+    # Hostname
+    else
+      ips="$(resolve_hostname_all "$entry" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
+      if [[ -z "$ips" ]]; then
+        echo "UNKNOWN,$entry" >> "$tmp"
+      else
+        while IFS= read -r ip; do
+          echo "$ip,$entry" >> "$tmp"
+        done <<< "$ips"
+      fi
+    fi
+  done < "$infile"
+
+  # Deduplicate identical rows only
+  sort "$tmp" | uniq > "$outfile"
+}
 
 scope_scan_all () {
   logtime="$(now)"
   abspath="$(pwd)""/""$1"
-  set -x
-  mkdir -p rustscan nuclei
-  # to do - get hostname before calling the scan, and tweak the nmap flags 
-  echo "beginning rustscan at $logtime with command 'rustscan -a $1 -- -sS -sV -A -Pn -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
-  cd ./rustscan && sudo rustscan -a "$abspath" --ulimit 5000 -- -sS -sV -A -Pn -oA {{ip}}-"$logtime"-output
   
+  mkdir -p rustscan nuclei
+  
+  echo "Resolving IPs to hostnames for mapping later"
+
+  # map hostnames to IPs
+  resolve_helper "$abspath"
+  set -x
+  echo "beginning rustscan at $logtime with command 'rustscan -a $1 -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
+  
+  # flags here match the -pt profile
+  cd ./rustscan && sudo rustscan -a "$abspath" -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA {{ip}}-"$logtime"-output
+  
+  # parse out our gnmap results for mapping later
+  for f in *.gnmap; do                             
+  parse_gnmap_ports < "$f"
+  done > ips_all_ports.csv
+  # merge in rustscan results, map back to hostnames
+  merge_ip_hosts_ports ../mapping.csv all_ports.csv
+
   # use these for feroxbusting later
   get_web_servers
   
@@ -146,11 +283,17 @@ scope_scan_all () {
   nuclei -sa -as -l "$abspath" -o nuclei/full-scope-nuclei.txt
   
   # nonstandard web servers 
-  nuclei -l ../rustscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
+  nuclei -l rustscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
 
   set +x
   echo "Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
-  1. Use crawl_fqdns if no direct access allowed
+  Next Steps - Review the following files and directories:
+  1. rustscan/hostname_ip_ports_merged.csv - this contains a list of hostnames, their IPs and identified open services
+  2. flyovers/ - this diretory contains all output from gowitness for any web servers found
+  3. nuclei/- nuclei output 
+
+  Next Tools to run:
+  1. Use crawl_fqdns if no direct access to web services via IPs are allowed
   2. Use feroxbuster_urls ./urls.txt if direct access allowed
   
   Finally, review all output and begin manual testing!"
