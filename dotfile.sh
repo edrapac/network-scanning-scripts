@@ -138,37 +138,42 @@ resolve_hostname_all() {
 parse_gnmap_ports () {
   awk '
   /^Host:/ {
+
+    # Only process Host lines that actually contain Ports:
+    if ($0 !~ /Ports:/) next
+
     ip="UNKNOWN"
     os="UNKNOWN"
+    ports=""
 
     # IP
     if (match($0, /^Host: ([0-9.]+)/, m)) {
       ip=m[1]
     }
 
-    # OS
+    # OS (optional)
     if (match($0, /OS: ([^ ]+.*?)(  Seq Index:|$)/, o)) {
       os=o[1]
     }
 
     # Ports
     if (match($0, /Ports: (.*)/, p)) {
-      n=split(p[1], ports, ",")
+      n=split(p[1], ps, ",")
       for (i=1; i<=n; i++) {
-        split(ports[i], f, "/")
-
+        split(ps[i], f, "/")
         port=f[1]
         state=f[2]
         proto=toupper(f[3])
-        service=f[5]
 
         if (state == "open") {
-          if (service == "" ) service="UNKNOWN"
-          printf "%s, %s, %s %s (%s)\n",
-                 ip, os, port, proto, toupper(service)
+          ports = ports proto port "; "
         }
       }
     }
+
+    if (ports == "") ports="UNKNOWN"
+
+    printf "%s, %s, %s\n", ip, os, ports
   }'
 }
 
@@ -178,7 +183,7 @@ merge_ip_hosts_ports () {
   local out_csv="${3:-hostname_ip_ports_merged.csv}"
 
   # header
-  echo "ip,hostname,OS,port" > "$out_csv"
+  echo "IP Address,Host Name,Operating System,Responding Services" > "$out_csv"
 
   awk -F', *' '
     NR==FNR {
@@ -270,6 +275,7 @@ scope_scan_all () {
   parse_gnmap_ports < "$f"
   done > ips_all_ports.csv
   # merge in rustscan results, map back to hostnames
+  #TODO - stack ports port1; port2; etc per host
   merge_ip_hosts_ports ../mapping.csv ips_all_ports.csv
 
   # use these for feroxbusting later
