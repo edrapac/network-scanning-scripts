@@ -5,39 +5,30 @@ This is a bunch of scripts to help automate out some of the external pentest pro
 What do they do?
 
 START HERE IF YOU WANT TO EXPAND SCOPE
-1. apex_expand_scope
+1. expand_scope
   * Input: an apex domain like acme.com
   * Output: a file of fqdns of all subdomains found 
-  * Used By: rustscan_scan, fqdns functions
-2. apex_quick
+  * Used By: scope_scan_all, fqdns functions
+2. expand_scope_quick_checks
   * Input: an apex domain like acme.com
   * Output: a file of fqdns all subdomains found for each apex, top 1000 port scan, with nuclei results ran for all of the web servers
   * Used By: rustscan_scan, fqdns functions
 
-2.5 apex_nuclei (optional/helper)
-  * Input: an apex domain like acme.com
-  * Output: a file of fqdns all subdomains found for each apex, with nuclei ran on all of them
-  * Used By: N/A
-
 START HERE IF YOU ARE NOT EXPANDING SCOPE
 3. scope_scan_all
-  * Input: a file with hosts (or IPs) separated by newlines
+  * Input: a file with hosts, IPs, CIDR ranges, or a mixture of all 3, separated by newlines
   * Output: a scan of all TCP ports for specific hosts, a file of all hosts running web servers, and a flyover of screenshots of all web servers found
-  * Used By: fqdns_crawl/feroxbuster_urls, fqdns_nuclei/url_nuclei
-4. fqdns_crawl
-  * Input: a file with webhosts (or IPs) and ports separated by newlines (from rustscan_scan or apex_quick)
+  * Used By: crawl_scope and feroxbuster_urls
+4. crawl_scope
+  * Input: a file with webhosts (or IPs) and ports separated by newlines (from rustscan_scan or expand_scope_quick_checks)
   * Output: Runs httpx to fingerprint webserver, feroxbuster, and then katana for spidering
   * Used By: N/A
-4.5. urls_feroxbuster (optional/helper) - must be called by cat-ing a file
-  * Input: a file with webhosts (or IPs) and ports separated by newlines (from rustscan_scan or apex_quick)
+4.5. feroxbuster_urls (optional/helper) - must be called by cat-ing a file
+  * Input: a file with webhosts (or IPs) and ports separated by newlines (from rustscan_scan or expand_scope_quick_checks)
   * Output: feroxbuster scan on each host
   * Used By: N/A
-5. fqdns_nuclei
-  * Input: a file with hosts webhosts (or IPs) and ports separated by newlines
-  * Output: nuclei scan of all hosts running web servers
-  * Used By: N/A
-6. flyover
-  * Input: a file with webhosts (or IPs) and ports separated by newlines (from rustscan_scan or apex_quick)
+5. flyover (happens by default with scope_scan_all)
+  * Input: a file with webhosts (or IPs) and ports separated by newlines (from scope_scan_all or expand_scope_quick_checks)
   * Output: a gowitness flyover of all top level site content (Work in progress to get snapshots of content discovered in crawling)
   * Used By: N/A
 '
@@ -77,7 +68,7 @@ install_go_tools() {
 
 install_wordlists() {
     mkdir -p "$HOME/tools"
-    sudo apt install seclists
+    sudo apt install -y seclists massdns
     cat /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt /usr/share/seclists/Discovery/Web-Content/api/api-seen-in-wild.txt /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt | tr [A-Z] [a-z] | sort -u > "$HOME/tools/content-directories.txt"
 }
 
@@ -94,15 +85,8 @@ install_rustscan() {
   for file in ./rustscan_install/*.deb; do sudo dpkg -i $file; done
 }
 
-git_clone_tooling() {
-    export GIT_TERMINAL_PROMPT=0
-    git clone https://github.com/BooOM/fuzz.txt "$HOME/tools/lists/"
-    
-    git clone https://github.com/Sybil-Scan/getresolvers "$HOME/tools/getresolvers/"
-    pushd "$HOME/tools/getresolvers"
-    getresolvers
-    sudo apt install -y massdns
-    
+git_clone_config() {
+    export GIT_TERMINAL_PROMPT=0    
 }
 
 mkdir -p "$HOME/tool_logs/"
@@ -275,13 +259,12 @@ scope_scan_all () {
   parse_gnmap_ports < "$f"
   done > ips_all_ports.csv
   # merge in rustscan results, map back to hostnames
-  #TODO - stack ports port1; port2; etc per host
   merge_ip_hosts_ports ../mapping.csv ips_all_ports.csv
 
   # use these for feroxbusting later
   get_web_servers
   
-  # we run flyover on the scope file because we want to capture screenshots of fqdns and not direct access IPs
+  # we run flyover on the scope file because we want to capture screenshots via hostname and not direct IP access attempts
   cd ../ && flyover "$abspath"
   
 
@@ -292,24 +275,25 @@ scope_scan_all () {
   nuclei -l rustscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
 
   set +x
-  echo "Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
+  echo 'Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
   Next Steps - Review the following files and directories:
   1. rustscan/hostname_ip_ports_merged.csv - this contains a list of hostnames, their IPs and identified open services
   2. flyovers/ - this diretory contains all output from gowitness for any web servers found
   3. nuclei/- nuclei output 
 
   Next Tools to run:
-  1. Use crawl_fqdns if no direct access to web services via IPs are allowed
-  2. Use feroxbuster_urls ./urls.txt if direct access allowed
+  1. Use crawl_scope if no direct access to web services via IPs are allowed
+  2. Use feroxbuster_urls if direct access allowed via: "while read lines; do feroxbuster_urls $lines; done < ./urls.txt"
   
-  Finally, review all output and begin manual testing!"
+  Finally, review all output and begin manual testing!'
 
   
 }
 
+# helper function for repeated use 
 feroxbuster_urls() {
   logtime="$(now)"
-  url=${1?Error: no url file found}
+  url=${1?Error: no url found}
   domain=$(echo "$url" | cut -d \/ -f3)
   set -x
   mkdir -p feroxbuster
@@ -317,7 +301,7 @@ feroxbuster_urls() {
   set +x
 }
 
-apex_expand_scope (){
+expand_scope (){
   logtime="$(now)"
   set +x 
   domain=$1
@@ -331,47 +315,23 @@ apex_expand_scope (){
   echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
 }
 
-#TODO Fix this
-fqdn_content() {
+crawl_scope() {
   logtime="$(now)"
-  fqdnsfile=${2?Error: no domain file provided}
-  filename=$(basename "${pwd}")
-
-  set -x
-  mkdir -p naabu httpx feroxbuster
-  naabu -p - -l "$fqdnsfile" --silent --rate 2500 -o "naabu/"$logtime"-$filename-all-tcp.output"
-  httpx -l "naabu/"$logtime"-$filename-all-tcp.output" --silent -o "httpx/"$logtime"-$filename"
-  cat "httpx/"$logtime"-$filename-naabu.output" | feroxbuster --filter-status 400,404,500,403 --stdin --no-state -k -A -o "feroxbuster/"$logtime"-$filename-content-directories.output" -w ~/tools/content-directories.txt
-  set +x
-}
-
-crawl_fqdns() {
-  logtime="$(now)"
-  fqdn=${1?Error: no FQDN file provided}
-  fbn=$(basename $fqdn)
+  scope=${1?Error: no file provided}
   set -x
   mkdir -p httpx feroxbuster katana
 
-  cat "$fqdn" | httpx -nc -fhr -title -tech-detect -status-code -cname -server -silent -o httpx/"$logtime"-$fbn.raw
-  cat httpx/"$logtime"-$fbn.raw | cut -d " " -f1 > httpx/"$logtime"-$fbn-discovered.output
-  cat httpx/"$logtime"-$fbn-discovered.output | feroxbuster  --depth 3 --stdin --silent --no-state --filter-status 400,404,500,403 -k -A -o feroxbuster/"$logtime"-$fbn-content-directories.output
-  cat feroxbuster/"$logtime"-$fbn-content-directories.output | katana --silent > katana/"$logtime"-$fbn-feroxbuster-content-directories.output
+  cat "$scope" | httpx -nc -fhr -title -tech-detect -status-code -cname -server -silent -o httpx/"$logtime"-$scope.raw
+  cat httpx/"$logtime"-$scope.raw | cut -d " " -f1 > httpx/"$logtime"-$scope-discovered.output
+  cat httpx/"$logtime"-$scope-discovered.output | feroxbuster  --depth 3 --stdin --silent --no-state --filter-status 400,404,500,403 -k -A -o feroxbuster/"$logtime"-$scope-content-directories.output
+  cat feroxbuster/"$logtime"-$scope-content-directories.output | katana --silent > katana/"$logtime"-$scope-feroxbuster-content-directories.output
   set +x
 }
 
-fqdns_nuclei() {
-  logtime="$(now)"
-  fqdn=${1?Error: no FQDN file provided}
-  fbn=$(basename $fqdn)
-  set -x
-  mkdir -p nuclei
-  nuclei -sa -as -l $1 -o "nuclei/"$logtime"-fqdn_nuclei.output"
-  set +x
-}
 
-url_nuclei() {
+# helper function for re use if we want to call a nuclei scan repeatedly
+url_nuclei_base_scan() {
   logtime="$(now)"
-  fbn=$(basename $fqdn)
   set -x
   mkdir -p nuclei
   nuclei -sa -as -l $1 -o "nuclei/"$logtime"-urls_nuclei.output"
@@ -386,14 +346,8 @@ flyover () {
   gowitness scan file -f "$scope" --screenshot-path ./flyovers
 }
 
-apex_nuclei() {
-  logtime="$(now)"
-  set -x
-  mkdir -p nuclei
-  subfinder -d "$1" -silent | httpx | nuclei -sa -as -o "nuclei/"$logtime"_apex-nuclei-templates.output"
-}
 
-apex_quick() {
+expand_scope_quick_checks() {
   logtime="$(now)"
   domain=$1
   set -x
@@ -404,9 +358,11 @@ apex_quick() {
   flyover "quick/"$domain"-alive-subs-ip.txt"
   sudo rustscan -a "quick/"$domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
   get_web_servers
-  # fix this, this isnt generating links correctly
-  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quickwins/"$domain"-gau.txt" | \
-  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quickwins/"$domain"-web-alive.txt" | awk '{print $1}' | \
+
+  # TODO fix this, this isnt generating links correctly
+  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
+  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
+  
   nuclei -sa -as -l "quick/"$domain"-alive-subs.txt" -o "quick/"$domain"-nuclei.txt"
   # nonstandard web servers 
   nuclei -l ./urls.txt -as -sa -o "quick/"$domain"-nuclei_nonstandard_web.txt"
