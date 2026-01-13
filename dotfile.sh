@@ -93,12 +93,19 @@ mkdir -p "$HOME/tool_logs/"
 
 install_all_tools () {
 
-install_go
-install_rustscan
-install_go_tools
-install_wordlists
-git_clone_tooling
-install_nmap_parser
+s1=$(cat /etc/issue2| awk '{printf $2}')
+echo $s1
+if [[ "$s1" == "Appliance" ]]; then
+  echo "You are attempting to run this tool on an appliance. Appliances are not supported and many of the install scripts will break the operating system. This script will now exit"
+  return
+else
+  install_go
+  install_rustscan
+  install_go_tools
+  install_wordlists
+  git_clone_tooling
+  install_nmap_parser
+fi
 }
 
 enable_pwdless_root () {
@@ -193,50 +200,54 @@ merge_ip_hosts_ports () {
 }
 
 resolve_helper () {
-  infile="$1"
-  outfile="${2:-mapping.csv}"
+        infile="$1"
+        outfile="${2:-mapping.csv}"
+        tmp="$(mktemp)"
+        trap 'rm -f "$tmp"' EXIT
 
-  tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
+        expand_cidr () {
+                nmap -n -sL "$1" 2>/dev/null | awk '/Nmap scan report for/ {print $NF}'
+        }
 
-  expand_cidr() {
-    nmap -n -sL "$1" 2>/dev/null | awk '/Nmap scan report for/ {print $NF}'
-  }
+        while IFS= read -r entry || [[ -n "$entry" ]]
+        do
+                entry="$(echo "$entry" | xargs)"
+                [[ -z "$entry" ]] && continue
 
-  while IFS= read -r entry || [[ -n "$entry" ]]; do
-    entry="$(echo "$entry" | xargs)"
-    [[ -z "$entry" ]] && continue
+                # CIDR or dash-range
+                if [[ "$entry" =~ / ]] || [[ "$entry" =~ - ]]
+                then
+                        while IFS= read -r ip
+			do
+			    hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
+			    [[ -z "$hostname" ]] && hostname="UNKNOWN"
+			    echo "$ip,$hostname" >> "$tmp"
+			done < <(expand_cidr "$entry")
 
-    # CIDR
-    if [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-      expand_cidr "$entry" | while IFS= read -r ip; do
-        hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
-        [[ -z "$hostname" ]] && hostname="UNKNOWN"
-        echo "$ip,$hostname" >> "$tmp"
-      done
+                # Plain IP
+                elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+                then
+                        hostname="$(getent hosts "$entry" | awk '{print $2}' | head -n1)"
+                        [[ -z "$hostname" ]] && hostname="UNKNOWN"
+                        echo "$entry,$hostname" >> "$tmp"
 
-    # IP
-    elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-      hostname="$(getent hosts "$entry" | awk '{print $2}' | head -n1)"
-      [[ -z "$hostname" ]] && hostname="UNKNOWN"
-      echo "$entry,$hostname" >> "$tmp"
-
-    # Hostname
-    else
-      ips="$(resolve_hostname_all "$entry" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
-      if [[ -z "$ips" ]]; then
-        echo "UNKNOWN,$entry" >> "$tmp"
-      else
-        while IFS= read -r ip; do
-          echo "$ip,$entry" >> "$tmp"
-        done <<< "$ips"
-      fi
-    fi
-  done < "$infile"
-
-  # Deduplicate identical rows only
-  sort "$tmp" | uniq > "$outfile"
+                # Hostname
+                else
+                        ips="$(resolve_hostname_all "$entry" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
+                        if [[ -z "$ips" ]]
+                        then
+                                echo "UNKNOWN,$entry" >> "$tmp"
+                        else
+                                while IFS= read -r ip
+                                do
+                                        echo "$ip,$entry" >> "$tmp"
+                                done <<< "$ips"
+                        fi
+                fi
+        done < "$infile"
+        sort "$tmp" | uniq > "$outfile"
 }
+
 
 scope_scan_all () {
   logtime="$(now)"
@@ -248,11 +259,12 @@ scope_scan_all () {
 
   # map hostnames to IPs
   resolve_helper "$abspath"
+  cat mapping.csv | awk -F "," '{printf $1"\n"}' > ips
   set -x
-  echo "beginning rustscan at $logtime with command 'rustscan -a $1 -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
+  echo "beginning rustscan at $logtime with command 'rustscan -a ./ips -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
   
   # flags here match the -pt profile
-  cd ./rustscan && sudo rustscan -a "$abspath" -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA {{ip}}-"$logtime"-output
+  cd ./rustscan && sudo rustscan --ulimit 5000 -a $abspath -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA {{ip}}-"$logtime"-output
   
   # parse out our gnmap results for mapping later
   for f in *.gnmap; do                             
@@ -295,10 +307,8 @@ feroxbuster_urls() {
   logtime="$(now)"
   url=${1?Error: no url found}
   domain=$(echo "$url" | cut -d \/ -f3)
-  set -x
   mkdir -p feroxbuster
-  echo "$url" | feroxbuster --depth 3 --stdin --silent --no-state --filter-status 400,404,500,403 -k -A -o feroxbuster/"$logtime"-"$domain"-content-directories.output -w ~/tools/content-directories.txt
-  set +x
+  echo "$url" | feroxbuster --depth 3 --stdin --quiet --no-state --filter-status 400,404,500,403,502,503 -k -A -o feroxbuster/"$logtime"_"$domain"_feroxbuster -w ~/tools/content-directories.txt
 }
 
 expand_scope (){
@@ -353,18 +363,37 @@ expand_scope_quick_checks() {
   set -x
   mkdir -p quick/"$domain"
   
-  subfinder -d "$domain" -silent | anew "quick/"$domain"-subs.txt" | \
-  dnsx -resp -silent | anew "quick/"$domain"-alive-subs-ip.txt" | awk '{print $1}' | anew "quick/"$domain"-alive-subs.txt"
-  flyover "quick/"$domain"-alive-subs-ip.txt"
-  sudo rustscan -a "quick/"$domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
-  get_web_servers
+  subfinder -d "$domain" -silent | anew "quick/"$domain"/"$domain"-subs.txt" | \
+  dnsx -resp -silent | anew "quick/"$domain"/"$domain"-alive-subs-ip.txt" | awk '{print $1}' | anew "quick/"$domain"/"$domain"-alive-subs.txt"
+  flyover "quick/"$domain"/"$domain"-alive-subs.txt"
+  sudo rustscan -a "quick/"$domain"/"$domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
+  cd "quick/"$domain && get_web_servers
 
   # TODO fix this, this isnt generating links correctly
   #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
   #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
   
-  nuclei -sa -as -l "quick/"$domain"-alive-subs.txt" -o "quick/"$domain"-nuclei.txt"
+  nuclei -sa -as -l "quick/"$domain"/"$domain"-alive-subs.txt" -o "quick/"$domain"/"$domain"-nuclei.txt"
   # nonstandard web servers 
-  nuclei -l ./urls.txt -as -sa -o "quick/"$domain"-nuclei_nonstandard_web.txt"
+  nuclei -l ./urls.txt -as -sa -o "quick/"$domain"/"$domain"-nuclei_non_standard.txt"
+  set +x
+}
+quick_checks() {
+  logtime="$(now)"
+  domain=$1
+  set -x
+  mkdir -p quick/"$domain"
+  
+  flyover $domain
+  sudo rustscan -a $domain -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
+  cd "quick/"$domain && get_web_servers
+
+  # TODO fix this, this isnt generating links correctly
+  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
+  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
+  
+  nuclei -sa -as -l $domain -o $domain"-nuclei.txt"
+  # nonstandard web servers 
+  nuclei -l ./urls.txt -as -sa -o $domain"-nuclei_non_standard.txt"
   set +x
 }
