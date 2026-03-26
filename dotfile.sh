@@ -122,6 +122,7 @@ resolve_hostname_all() {
   dig +short "$host"
 
   # public resolvers
+  # on internals change this to the DC's
   dig @8.8.8.8 +short "$host"
   dig @1.1.1.1 +short "$host"
   dig @9.9.9.9 +short "$host"
@@ -166,6 +167,18 @@ parse_gnmap_ports () {
 
     printf "%s, %s, %s\n", ip, os, ports
   }'
+}
+
+snmp_spray () {
+  infile="$1"
+  cat $infile | xargs -P 10 -I {} sh -c 'snmpwalk -v 2c -c public {} > {}.txt 2> /dev/null'
+  read -n1 -p "Cleanup empty files?" cleanup 
+  case $doit in  
+    y|Y) find . -maxdepth 1 -empty -type f -exec mv {} /dev/null \; ;; 
+    n|N) echo 'no cleanup performed' ;; 
+    *) echo 'Err please provide y or n' ;; 
+  esac
+
 }
 
 merge_ip_hosts_ports () {
@@ -218,11 +231,11 @@ resolve_helper () {
                 if [[ "$entry" =~ / ]] || [[ "$entry" =~ - ]]
                 then
                         while IFS= read -r ip
-			do
-			    hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
-			    [[ -z "$hostname" ]] && hostname="UNKNOWN"
-			    echo "$ip,$hostname" >> "$tmp"
-			done < <(expand_cidr "$entry")
+            do
+                hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
+                [[ -z "$hostname" ]] && hostname="UNKNOWN"
+                echo "$ip,$hostname" >> "$tmp"
+            done < <(expand_cidr "$entry")
 
                 # Plain IP
                 elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
@@ -253,7 +266,7 @@ scope_scan_all () {
   logtime="$(now)"
   abspath="$(pwd)""/""$1"
   
-  mkdir -p rustscan nuclei
+  mkdir -p masscan nuclei
   
   echo "Resolving IPs to hostnames for mapping later"
 
@@ -261,11 +274,17 @@ scope_scan_all () {
   resolve_helper "$abspath"
   cat mapping.csv | awk -F "," '{printf $1"\n"}' > ips
   set -x
-  echo "beginning rustscan at $logtime with command 'rustscan -a ./ips -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-rustscan-output'" >> "$HOME/tool_logs/"$logtime"-rustscan-logs"
+  echo "beginning masscan at $logtime with command 'sudo masscan -e tailscale0 -p1-65535,U:7,9,11,13,17,19,37,53,67,68,69,88,111,123,135,137,138,161,162,177,213,259,260,445,464,500,514,523,1194,1434,1701,1900,2049,2746,3401,4045,4500,4665,5353,5632,7777,17185,18233,26198,27444,31337,32771,34555,54321 -iL ../ips --max-rate 5000 -oX masscan_raw_output.xml'" >> "$HOME/tool_logs/"$logtime"-masscan-logs"
   
   # flags here match the -pt profile
-  cd ./rustscan && sudo rustscan --ulimit 5000 -a $abspath -- -sS -sU -sV -A --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA {{ip}}-"$logtime"-output
-  
+  # change interface to appliance interface
+  # change ports to -p1-25000,U:161
+  # change rate to --max-rate 15000
+  cd masscan && sudo masscan -e tailscale0 -p1-65535,U:7,9,11,13,17,19,37,53,67,68,69,88,111,123,135,137,138,161,162,177,213,259,260,445,464,500,514,523,1194,1434,1701,1900,2049,2746,3401,4045,4500,4665,5353,5632,7777,17185,18233,26198,27444,31337,32771,34555,54321 -iL ../ips --max-rate 5000 -oX masscan_raw_output.xml
+  open_ports=$(cat masscan_raw_output.xml | grep portid | cut -d "\"" -f 10 | sort -n | uniq | paste -sd,)
+  cat masscan_raw_output.xml | grep portid | cut -d "\"" -f 4 | sort -V | uniq > nmap_targets.tmp
+  sudo nmap -sS -sU -sV -A -p $open_ports -iL ./nmap_targets.tmp --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-masscan_to_nmap
+
   # parse out our gnmap results for mapping later
   for f in *.gnmap; do                             
   parse_gnmap_ports < "$f"
@@ -273,6 +292,7 @@ scope_scan_all () {
   # merge in rustscan results, map back to hostnames
   merge_ip_hosts_ports ../mapping.csv ips_all_ports.csv
 
+  # comment out the following functions until the end of the function for internals
   # use these for feroxbusting later
   get_web_servers
   
@@ -313,7 +333,7 @@ feroxbuster_urls() {
 
 expand_scope (){
   logtime="$(now)"
-  set +x 
+  # set +x 
   domain=$1
   mkdir  subfinder dnsrecon gobuster fqdns amass
   dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt
@@ -321,7 +341,9 @@ expand_scope (){
   cat amass/"$logtime"-"$domain"-output | awk '{printf $1; printf "\n"}' | grep "$domain" | uniq > amass/"$logtime"-"$domain"-amass.txt
   echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
   gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
-  cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
+  cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | awk -F " " '{printf "\n"$1}' | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
+  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt | dnsx -resp -silent | anew $domain"-alive-subs-ip.txt" | awk '{print $1}' | anew $domain"-alive-subs.txt"
+  cat $domain"-alive-subs.txt" | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 | anew gau_links
   echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
 }
 
@@ -363,19 +385,13 @@ expand_scope_quick_checks() {
   set -x
   mkdir -p quick/"$domain"
   
-  subfinder -d "$domain" -silent | anew "quick/"$domain"/"$domain"-subs.txt" | \
-  dnsx -resp -silent | anew "quick/"$domain"/"$domain"-alive-subs-ip.txt" | awk '{print $1}' | anew "quick/"$domain"/"$domain"-alive-subs.txt"
-  flyover "quick/"$domain"/"$domain"-alive-subs.txt"
-  sudo rustscan -a "quick/"$domain"/"$domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
-  cd "quick/"$domain && get_web_servers
-
-  # TODO fix this, this isnt generating links correctly
-  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
-  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
+  cd quick/"$domain" && expand_scope $domain
+  flyover $domain"-alive-subs.txt"
+  sudo rustscan -a $domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
   
-  nuclei -sa -as -l "quick/"$domain"/"$domain"-alive-subs.txt" -o "quick/"$domain"/"$domain"-nuclei.txt"
+  nuclei -sa -as -l $domain"-alive-subs.txt" -o $domain"-nuclei.txt"
   # nonstandard web servers 
-  nuclei -l ./urls.txt -as -sa -o "quick/"$domain"/"$domain"-nuclei_non_standard.txt"
+  nuclei -l ./urls.txt -as -sa -o $domain"-nuclei_non_standard.txt"
   set +x
 }
 quick_checks() {
@@ -385,6 +401,7 @@ quick_checks() {
   mkdir -p quick/"$domain"
   
   flyover $domain
+  # ToDO change this to masscan
   sudo rustscan -a $domain -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
   cd "quick/"$domain && get_web_servers
 
