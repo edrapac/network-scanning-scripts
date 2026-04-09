@@ -404,10 +404,6 @@ quick_checks() {
   # ToDO change this to masscan
   sudo rustscan -a $domain -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
   cd "quick/"$domain && get_web_servers
-
-  # TODO fix this, this isnt generating links correctly
-  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
-  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
   
   nuclei -sa -as -l $domain -o $domain"-nuclei.txt"
   # nonstandard web servers 
