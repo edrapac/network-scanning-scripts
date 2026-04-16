@@ -88,6 +88,9 @@ install_rustscan() {
 git_clone_config() {
     export GIT_TERMINAL_PROMPT=0    
 }
+install_dns_tooling() {
+    git clone https://github.com/blechschmidt/massdns.git "$HOME/tools/massdns"
+}
 
 mkdir -p "$HOME/tool_logs/"
 
@@ -212,53 +215,88 @@ merge_ip_hosts_ports () {
   ' "$ip_host_csv" "$ports_csv" >> "$out_csv"
 }
 
-resolve_helper () {
-        infile="$1"
-        outfile="${2:-mapping.csv}"
-        tmp="$(mktemp)"
-        trap 'rm -f "$tmp"' EXIT
+resolve_helper() {
+    local infile="$1"
+    local outfile="${2:-mapping.csv}"
+    local resolvers=~/tools/massdns/lists/resolvers.txt
 
-        expand_cidr () {
-                nmap -n -sL "$1" 2>/dev/null | awk '/Nmap scan report for/ {print $NF}'
-        }
+    local tmp_ips tmp_hosts tmp_ptr_queries tmp_ptr_out tmp_a_out result_tmp
+    tmp_ips=$(mktemp)
+    tmp_hosts=$(mktemp)
+    tmp_ptr_queries=$(mktemp)
+    tmp_ptr_out=$(mktemp)
+    tmp_a_out=$(mktemp)
+    result_tmp=$(mktemp)
+    trap 'rm -f "$tmp_ips" "$tmp_hosts" "$tmp_ptr_queries" "$tmp_ptr_out" "$tmp_a_out" "$result_tmp"' EXIT
 
-        while IFS= read -r entry || [[ -n "$entry" ]]
-        do
-                entry="$(echo "$entry" | xargs)"
-                [[ -z "$entry" ]] && continue
+    expand_cidr() {
+        nmap -n -sL "$1" 2>/dev/null | awk '/Nmap scan report for/ {print $NF}'
+    }
 
-                # CIDR or dash-range
-                if [[ "$entry" =~ / ]] || [[ "$entry" =~ - ]]
-                then
-                        while IFS= read -r ip
-            do
-                hostname="$(getent hosts "$ip" | awk '{print $2}' | head -n1)"
-                [[ -z "$hostname" ]] && hostname="UNKNOWN"
-                echo "$ip,$hostname" >> "$tmp"
-            done < <(expand_cidr "$entry")
+    ip_to_arpa() {
+        IFS='.' read -r a b c d <<< "$1"
+        echo "${d}.${c}.${b}.${a}.in-addr.arpa"
+    }
 
-                # Plain IP
-                elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
-                then
-                        hostname="$(getent hosts "$entry" | awk '{print $2}' | head -n1)"
-                        [[ -z "$hostname" ]] && hostname="UNKNOWN"
-                        echo "$entry,$hostname" >> "$tmp"
+    # ── Pass 1: split input into IP list and hostname list ──────────────────
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        entry="$(printf '%s' "$entry" | xargs)"
+        [[ -z "$entry" ]] && continue
 
-                # Hostname
-                else
-                        ips="$(resolve_hostname_all "$entry" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$')"
-                        if [[ -z "$ips" ]]
-                        then
-                                echo "UNKNOWN,$entry" >> "$tmp"
-                        else
-                                while IFS= read -r ip
-                                do
-                                        echo "$ip,$entry" >> "$tmp"
-                                done <<< "$ips"
-                        fi
-                fi
-        done < "$infile"
-        sort "$tmp" | uniq > "$outfile"
+        if [[ "$entry" =~ / ]] || [[ "$entry" =~ - ]]; then
+            # CIDR or dash range → expand to plain IPs
+            expand_cidr "$entry" >> "$tmp_ips"
+        elif [[ "$entry" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "$entry" >> "$tmp_ips"
+        else
+            echo "$entry" >> "$tmp_hosts"
+        fi
+    done < "$infile"
+
+    # ── Pass 2: reverse-resolve IPs via PTR (massdns) ───────────────────────
+    if [[ -s "$tmp_ips" ]]; then
+        # Build in-addr.arpa queries
+        while IFS= read -r ip; do
+            ip_to_arpa "$ip"
+        done < "$tmp_ips" > "$tmp_ptr_queries"
+
+        massdns -r "$resolvers" -t PTR -o S "$tmp_ptr_queries" 2>/dev/null \
+            | grep ' PTR ' > "$tmp_ptr_out"
+
+        # Parse "4.70.147.217.in-addr.arpa. PTR hostname." → ip,hostname
+        while IFS= read -r ip; do
+            arpa="$(ip_to_arpa "$ip")."        # trailing dot massdns uses
+            hostname=$(awk -v q="$arpa" 'tolower($1)==tolower(q) {
+                gsub(/\.$/, "", $3); print $3; exit
+            }' "$tmp_ptr_out")
+            [[ -z "$hostname" ]] && hostname="UNKNOWN"
+            echo "$ip,$hostname"
+        done < "$tmp_ips" >> "$result_tmp"
+    fi
+
+    # ── Pass 3: forward-resolve hostnames via A (massdns) ───────────────────
+    if [[ -s "$tmp_hosts" ]]; then
+        massdns -r "$resolvers" -t A -o S "$tmp_hosts" 2>/dev/null \
+            | grep ' A ' > "$tmp_a_out"
+
+        while IFS= read -r host; do
+            # A host may resolve to multiple IPs — emit one row per IP
+            host_dot="${host}."
+            mapfile -t ips < <(awk -v q="$host_dot" '
+                tolower($1)==tolower(q) && $2=="A" {print $3}
+            ' "$tmp_a_out")
+
+            if [[ ${#ips[@]} -eq 0 ]]; then
+                echo "UNKNOWN,$host"
+            else
+                for ip in "${ips[@]}"; do
+                    echo "$ip,$host"
+                done
+            fi
+        done < "$tmp_hosts" >> "$result_tmp"
+    fi
+
+    sort "$result_tmp" | uniq > "$outfile"
 }
 
 
@@ -268,10 +306,9 @@ scope_scan_all () {
   
   mkdir -p masscan nuclei
   
-  echo "Resolving IPs to hostnames for mapping later"
-
+  #echo "Resolving IPs to hostnames for mapping later"
   # map hostnames to IPs
-  resolve_helper "$abspath"
+  #resolve_helper "$abspath"
   cat mapping.csv | awk -F "," '{printf $1"\n"}' > ips
   set -x
   echo "beginning masscan at $logtime with command 'sudo masscan -e tailscale0 -p1-65535,U:7,9,11,13,17,19,37,53,67,68,69,88,111,123,135,137,138,161,162,177,213,259,260,445,464,500,514,523,1194,1434,1701,1900,2049,2746,3401,4045,4500,4665,5353,5632,7777,17185,18233,26198,27444,31337,32771,34555,54321 -iL ../ips --max-rate 5000 -oX masscan_raw_output.xml'" >> "$HOME/tool_logs/"$logtime"-masscan-logs"
@@ -280,7 +317,7 @@ scope_scan_all () {
   # change interface to appliance interface
   # change ports to -p1-25000,U:161
   # change rate to --max-rate 15000
-  cd masscan && sudo masscan -e tailscale0 -p1-65535,U:7,9,11,13,17,19,37,53,67,68,69,88,111,123,135,137,138,161,162,177,213,259,260,445,464,500,514,523,1194,1434,1701,1900,2049,2746,3401,4045,4500,4665,5353,5632,7777,17185,18233,26198,27444,31337,32771,34555,54321 -iL ../ips --max-rate 5000 -oX masscan_raw_output.xml
+  cd masscan && sudo masscan -e tailscale0 -p1-65535,U:7,9,11,13,17,19,37,53,67,68,69,88,111,123,135,137,138,161,162,177,213,259,260,445,464,500,514,523,1194,1434,1701,1900,2049,2746,3401,4045,4500,4665,5353,5632,7777,17185,18233,26198,27444,31337,32771,34555,54321 -iL ../ips --max-rate 10000 -oX masscan_raw_output.xml
   open_ports=$(cat masscan_raw_output.xml | grep portid | cut -d "\"" -f 10 | sort -n | uniq | paste -sd,)
   cat masscan_raw_output.xml | grep portid | cut -d "\"" -f 4 | sort -V | uniq > nmap_targets.tmp
   sudo nmap -sS -sU -sV -A -p $open_ports -iL ./nmap_targets.tmp --privileged -Pn --max-retries 1 --min-rtt-timeout 100ms --max-rtt-timeout 1030ms --initial-rtt-timeout 500ms --defeat-rst-ratelimit --min-rate 450 --max-rate 15000 -oA "$logtime"-masscan_to_nmap
@@ -404,6 +441,10 @@ quick_checks() {
   # ToDO change this to masscan
   sudo rustscan -a $domain -r 1-1000 -- -sS -sV -Pn -oA "quick/"$domain"/"{{ip}}-"$logtime"-quickwins-top-1000
   cd "quick/"$domain && get_web_servers
+
+  # TODO fix this, this isnt generating links correctly
+  #gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,pdf,mp3,mp4,mov --subs | anew "quick/"$domain"-gau.txt" | \
+  #httpx -silent -title -status-code -mc 200,403,400,500 | anew "quick/"$domain"-web-alive.txt" | awk '{print $1}' | \
   
   nuclei -sa -as -l $domain -o $domain"-nuclei.txt"
   # nonstandard web servers 
