@@ -341,7 +341,7 @@ scope_scan_all () {
   nuclei -sa -as -l "$abspath" -o nuclei/full-scope-nuclei.txt
   
   # nonstandard web servers 
-  nuclei -l rustscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
+  nuclei -l masscan/urls.txt -as -sa -o nuclei/full-scope-nuclei_nonstandard_web.txt
 
   set +x
   echo 'Rustscan, nuclei, and flyovers complete - review the output and determine if the web servers allow direct access or if you need to use FQDNS. 
