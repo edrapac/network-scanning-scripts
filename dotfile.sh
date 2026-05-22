@@ -40,9 +40,9 @@ get_web_servers() {
 }
 
 install_go() {
-    wget "https://go.dev/dl/go1.25.5.linux-amd64.tar.gz" -O /tmp/go.linux-amd64.tar.gz
+    wget "https://go.dev/dl/go1.26.3.linux-arm64.tar.gz" -O /tmp/go.linux-arm64.tar.gz
     sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf /tmp/go.linux-amd64.tar.gz
+    sudo tar -C /usr/local -xzf /tmp/go.linux-arm64.tar.gz
     echo "export PATH=$HOME/go/bin:/usr/local/share:/usr/local/go/bin:$HOME/.local/bin:/usr/local/sbin:/usr/bin:/sbin:/bin" >> "$HOME/.zshrc"
 }
 
