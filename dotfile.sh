@@ -40,9 +40,9 @@ get_web_servers() {
 }
 
 install_go() {
-    wget "https://go.dev/dl/go1.25.5.linux-amd64.tar.gz" -O /tmp/go.linux-amd64.tar.gz
+    wget "https://go.dev/dl/go1.26.3.linux-arm64.tar.gz" -O /tmp/go.linux-arm64.tar.gz
     sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf /tmp/go.linux-amd64.tar.gz
+    sudo tar -C /usr/local -xzf /tmp/go.linux-arm64.tar.gz
     echo "export PATH=$HOME/go/bin:/usr/local/share:/usr/local/go/bin:$HOME/.local/bin:/usr/local/sbin:/usr/bin:/sbin:/bin" >> "$HOME/.zshrc"
 }
 
@@ -106,7 +106,7 @@ else
   install_rustscan
   install_go_tools
   install_wordlists
-  git_clone_tooling
+  git_clone_config
   install_nmap_parser
 fi
 }
@@ -365,7 +365,7 @@ feroxbuster_urls() {
   url=${1?Error: no url found}
   domain=$(echo "$url" | cut -d \/ -f3)
   mkdir -p feroxbuster
-  echo "$url" | feroxbuster --depth 3 --stdin --quiet --no-state --filter-status 400,404,500,403,502,503 -k -A -o feroxbuster/"$logtime"_"$domain"_feroxbuster -w ~/tools/content-directories.txt
+  echo "$url" | feroxbuster --depth 3 --stdin --no-state --filter-status 400,404,500,403,502,503 -k -A -o feroxbuster/"$logtime"_"$domain"_feroxbuster -w ~/tools/content-directories.txt
 }
 
 expand_scope (){
@@ -379,8 +379,27 @@ expand_scope (){
   echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
   gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
   cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | awk -F " " '{printf "\n"$1}' | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
-  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt | dnsx -resp -silent | anew $domain"-alive-subs-ip.txt" | awk '{print $1}' | anew $domain"-alive-subs.txt"
+  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt | dnsx -resp -silent -r 1.1.1.1 | anew $domain"-alive-subs-ip.txt" | awk '{print $1}' | anew $domain"-alive-subs.txt"
   cat $domain"-alive-subs.txt" | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 | anew gau_links
+  echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
+}
+expand_scope_custom (){
+  logtime="$(now)"
+  # set +x 
+  domain=$1
+  mkdir $domain
+  cd $domain
+  mkdir  subfinder dnsrecon gobuster fqdns amass
+  dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt
+  amass enum  -nocolor -d "$domain" -active -o amass/"$logtime"-"$domain"-output -timeout 10
+  cat amass/"$logtime"-"$domain"-output | awk '{printf $1; printf "\n"}' | grep "$domain" | uniq > amass/"$logtime"-"$domain"-amass.txt
+  echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
+  gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
+  cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | awk -F " " '{printf "\n"$1}' | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
+  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt | dnsx -resp -silent -r 1.1.1.1 | anew $domain"-alive-subs-ip.txt" | awk '{print $1}' | anew $domain"-alive-subs.txt"
+  cat $domain"-alive-subs.txt" | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 | anew gau_links
+  flyover $domain"-alive-subs.txt"
+  cd ../
   echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
 }
 
@@ -412,12 +431,13 @@ flyover () {
   mkdir -p flyovers
   scope=$1
   logtime="$(now)"
-  gowitness scan file -f "$scope" --screenshot-path ./flyovers
+  gowitness scan file -f "$scope" --screenshot-path ./flyovers --timeout 10
 }
 
 
 expand_scope_quick_checks() {
   logtime="$(now)"
+  current_dir="$(pwd)"
   domain=$1
   set -x
   mkdir -p quick/"$domain"
@@ -425,11 +445,36 @@ expand_scope_quick_checks() {
   cd quick/"$domain" && expand_scope $domain
   flyover $domain"-alive-subs.txt"
   sudo rustscan -a $domain"-alive-subs.txt" -r 1-1000 -- -sS -sV -Pn -oA {{ip}}-"$logtime"-quickwins-top-1000
-  
-  nuclei -sa -as -l $domain"-alive-subs.txt" -o $domain"-nuclei.txt"
-  # nonstandard web servers 
-  nuclei -l ./urls.txt -as -sa -o $domain"-nuclei_non_standard.txt"
+  # nuclei scans can take long and hang. We cd out of the dir to make sure we can kill them if needed
+  cd $current_dir
+
+  nuclei -sa -as -l quick/"$domain"/$domain"-alive-subs.txt" -o quick/"$domain"/$domain"-nuclei.txt"
   set +x
+}
+get_mx() {
+    domain_file=$1
+    declare -a spoof_array
+    for domain in $(cat "$domain_file"); do 
+        mx=$(dig MX "$domain" +short)
+        echo "$domain: ${mx:-no mx}"
+        if [ -z "$mx" ]; then
+            spoof_array+=("$domain")
+        fi
+
+    done
+    printf "Check for spoofing now? y/n: "
+    read spoofcheck
+    if [ "$spoofcheck" = 'y' ]; then
+        for i in "${spoof_array[@]}"; do
+            echo "Running: swaks --to edrapac@sprocketsecurity.com \
+        --from spoofed@$i \
+        --header "Subject: spoof-test-1""
+            swaks --to edrapac@sprocketsecurity.com \
+        --from spoofed@$i \
+        --header "Subject: spoof-test-1"
+        done
+    fi
+
 }
 quick_checks() {
   logtime="$(now)"
