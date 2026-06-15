@@ -62,6 +62,34 @@ install_go_tools() {
     go install -v github.com/OJ/gobuster/v3@latest
     go install -v github.com/lc/gau/v2/cmd/gau@latest
     go install -v github.com/sensepost/gowitness@latest
+    ## --- 1. Install more dns stuff -------------------------------------------------------
+    info "Installing puredns (massdns wrapper) ..."
+    go install github.com/d3mondev/puredns/v2@latest
+
+    info "Installing gotator (permutations) ..."
+    go install github.com/Josue87/gotator@latest
+
+    info "Installing github-subdomains (code-search source) ..."
+    go install github.com/gwen001/github-subdomains@latest
+
+    ## --- 2. PATH sanity ----------------------------------------------------------
+    case ":$PATH:" in
+      *":$GOBIN_DIR:"*) : ;;   # already on PATH, nothing to do
+      *) warn "$GOBIN_DIR is not on your PATH. Add this to your shell rc:"
+         printf '       export PATH="$PATH:%s"\n' "$GOBIN_DIR" ;;
+    esac
+
+    ## --- 3. verify every new binary resolves -------------------------------------
+    info "Verifying installs ..."
+    fail=0
+    for bin in puredns gotator github-subdomains; do
+      if PATH="$PATH:$GOBIN_DIR" command -v "$bin" >/dev/null 2>&1; then
+        ok "$bin -> $(PATH="$PATH:$GOBIN_DIR" command -v "$bin")"
+      else
+        warn "$bin NOT found on PATH after install"
+        fail=1
+      fi
+    done
     GO111MODULE=on go install github.com/jaeles-project/gospider@latest
 }
 
@@ -90,6 +118,13 @@ git_clone_config() {
 }
 install_dns_tooling() {
     git clone https://github.com/blechschmidt/massdns.git "$HOME/tools/massdns"
+    N0KOVO_DIR="/usr/share/wordlists/n0kovo_subdomains"
+    info "Installing n0kovo subdomains wordlist -> $N0KOVO_DIR ..."
+    if [ -d "$N0KOVO_DIR/.git" ]; then
+      sudo git -C "$N0KOVO_DIR" pull --ff-only        # already cloned: just update
+    else
+      sudo git clone --depth 1 https://github.com/n0kovo/n0kovo_subdomains.git "$N0KOVO_DIR"
+    fi
 }
 
 mkdir -p "$HOME/tool_logs/"
@@ -107,6 +142,7 @@ else
   install_go_tools
   install_wordlists
   git_clone_config
+  install_dns_tooling
   install_nmap_parser
 fi
 }
@@ -274,6 +310,7 @@ resolve_helper() {
         done < "$tmp_ips" >> "$result_tmp"
     fi
 
+
     # ── Pass 3: forward-resolve hostnames via A (massdns) ───────────────────
     if [[ -s "$tmp_hosts" ]]; then
         massdns -r "$resolvers" -t A -o S "$tmp_hosts" 2>/dev/null \
@@ -383,6 +420,85 @@ expand_scope (){
   cat $domain"-alive-subs.txt" | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 | anew gau_links
   echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
 }
+expand_scope_new (){
+  set -x
+  logtime="$(now)"                                     # timestamp prefix shared by every file this run
+  domain=$1                                            # target apex, passed as first arg
+  # one dir per stage so artifacts stay sorted, comparable, and re-runnable
+  mkdir -p subfinder dnsrecon amass crt github puredns perms fqdns resolvers
+
+  ## 0. RESOLVER HYGIENE — use trickest's pre-validated list (refreshed daily upstream).
+  ## Cache locally and only re-pull once per day, so repeated runs are instant.
+  resolvers="$HOME/.config/recon/resolvers.txt"
+  mkdir -p "$(dirname "$resolvers")"
+  # refetch only if missing or older than 24h (-mtime +0 = modified >1 day ago)
+  if [ ! -s "$resolvers" ] || [ -n "$(find "$resolvers" -mtime +0 2>/dev/null)" ]; then
+    curl -s https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt -o "$resolvers"
+  fi
+  cp "$resolvers" resolvers/"$logtime"-resolvers.txt    # snapshot the set used for this run's records
+
+  ## 1. PASSIVE SOURCES
+  dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt   # SOA/NS/MX + AXFR attempt
+  # -all = every passive provider (needs API keys in provider-config.yaml);
+  # -recursive = re-query discovered names for deeper tiers
+  subfinder -all -recursive -silent -d "$domain" \
+    > subfinder/"$logtime"-"$domain"-subfinder.txt
+  # amass PASSIVE only here — active brute is handled better by puredns below
+  amass enum -passive -nocolor -d "$domain" -o amass/"$logtime"-"$domain"-output -timeout 5
+  sort -u amass/"$logtime"-"$domain"-output | grep "$domain" \
+    > amass/"$logtime"-"$domain"-amass.txt              # sort -u = true dedupe (bare uniq only drops adjacent dups)
+  # Certificate Transparency via certspotter API — crt.sh replacement, proven live.
+  # Each issuance object carries a dns_names[] array; include_subdomains expands the tree.
+  curl -s "https://api.certspotter.com/v1/issuances?domain=$domain&include_subdomains=true&expand=dns_names" \
+    | jq -r '.[].dns_names[]' \
+    | sed 's/\*\.//g' | grep "$domain" | sort -u \
+    > crt/"$logtime"-"$domain"-certspotter.txt          # flatten dns_names, strip "*." wildcards, dedupe
+  # GitHub code search for leaked *.domain references (needs GITHUB_TOKEN env var)
+  #github-subdomains -d "$domain" -t "$GITHUB_TOKEN" \
+   # > github/"$logtime"-"$domain"-github.txt 2>/dev/null
+
+  ## 2. ACTIVE BRUTE FORCE via massdns (puredns wraps it).
+  ## Big wordlist + validated resolvers + automatic wildcard filtering — puredns
+  ## re-checks every hit against trusted resolvers, so no wildcard false positives.
+  puredns bruteforce /usr/share/wordlists/n0kovo_subdomains/n0kovo_subdomains_medium.txt "$domain" \
+    -r "$resolvers" --rate-limit 200 -q \
+    > puredns/"$logtime"-"$domain"-brute.txt
+
+  ## 3. MERGE everything discovered so far into one candidate list
+  cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt \
+      amass/"$logtime"-"$domain"-amass.txt \
+      subfinder/"$logtime"-"$domain"-subfinder.txt \
+      crt/"$logtime"-"$domain"-certspotter.txt \
+    #  github/"$logtime"-"$domain"-github.txt \
+      puredns/"$logtime"-"$domain"-brute.txt \
+    | awk -F " " '{print $1}' | grep "$domain" | sort -u \
+    > fqdns/"$logtime"-"$domain"-fqdnslist.txt
+
+  ## 4. PERMUTATION PASS — mutate known-good names (dev->dev1/dev-old/staging),
+  ## then validate the resulting flood through puredns (huge volume, wildcard-prone)
+  gotator -sub fqdns/"$logtime"-"$domain"-fqdnslist.txt \
+    -perm /usr/share/seclists/Discovery/DNS/dns-permutations.txt \
+    -depth 1 -numbers 1 -mindup -adv -silent \
+    | puredns resolve -r "$resolvers" --rate-limit 200 -q \
+    > perms/"$logtime"-"$domain"-perms.txt
+  cat perms/"$logtime"-"$domain"-perms.txt >> fqdns/"$logtime"-"$domain"-fqdnslist.txt  # fold mutations back in
+  sort -u -o fqdns/"$logtime"-"$domain"-fqdnslist.txt fqdns/"$logtime"-"$domain"-fqdnslist.txt  # dedupe in place
+
+  ## 5. AUTHORITATIVE VALIDATION — the record validity you actually care about.
+  ## dnsx confirms the record is live and captures the resolved IP next to it.
+  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt \
+    | dnsx -resp -silent -r 1.1.1.1 \
+    | anew "$domain-alive-subs-ip.txt" \
+    | awk '{print $1}' | anew "$domain-alive-subs.txt"
+  set +x 
+  ## 6. URL HARVEST from confirmed-live hosts only
+  cat "$domain-alive-subs.txt" \
+    | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 \
+    | anew gau_links
+
+  echo "Expansion of $domain complete. Live hosts: $(wc -l < "$domain-alive-subs.txt"). For ownership-expansion (WARNING: may return assets NOT owned by $domain — verify vs scope) consider: amass intel -whois -active -d $domain"
+}
+
 expand_scope_custom (){
   logtime="$(now)"
   # set +x 
@@ -472,6 +588,10 @@ get_mx() {
             swaks --to edrapac@sprocketsecurity.com \
         --from spoofed@$i \
         --header "Subject: spoof-test-1"
+        done
+    else
+        for i in "${spoof_array[@]}"; do
+            echo $i
         done
     fi
 
