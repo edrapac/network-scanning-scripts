@@ -505,15 +505,7 @@ expand_scope_custom (){
   domain=$1
   mkdir $domain
   cd $domain
-  mkdir  subfinder dnsrecon gobuster fqdns amass
-  dnsrecon -d "$domain" > dnsrecon/"$logtime"-"$domain"-dnsrecon.txt
-  amass enum  -nocolor -d "$domain" -active -o amass/"$logtime"-"$domain"-output -timeout 10
-  cat amass/"$logtime"-"$domain"-output | awk '{printf $1; printf "\n"}' | grep "$domain" | uniq > amass/"$logtime"-"$domain"-amass.txt
-  echo "$domain" | subfinder -silent > subfinder/"$logtime"-"$domain"-subfinder.txt
-  gobuster dns --domain "$domain" --wordlist /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -q > gobuster/"$logtime"-"$domain"-gobuster-output.txt
-  cat dnsrecon/"$logtime"-"$domain"-dnsrecon.txt amass/"$logtime"-"$domain"-amass.txt subfinder/"$logtime"-"$domain"-subfinder.txt gobuster/"$logtime"-"$domain"-gobuster-output.txt | awk -F " " '{printf "\n"$1}' | sort -u > fqdns/"$logtime"-"$domain"-fqdnslist.txt
-  cat fqdns/"$logtime"-"$domain"-fqdnslist.txt | dnsx -resp -silent -r 1.1.1.1 | anew $domain"-alive-subs-ip.txt" | awk '{print $1}' | anew $domain"-alive-subs.txt"
-  cat $domain"-alive-subs.txt" | gau --blacklist eot,svg,swf,woff,tff,png,jpg,gif,btf,bmp,mov --subs --threads 30 | anew gau_links
+  expand_scope_new $domain
   flyover $domain"-alive-subs.txt"
   cd ../
   echo "Expansion and enumeration of $domain done. For one final expansion, consider running `amass intel -whois -active -d $domain` WARNING: There is a possibility this command will return apex and subdomains that are not actually owned by the owners of $domain" 
